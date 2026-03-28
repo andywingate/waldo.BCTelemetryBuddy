@@ -38,6 +38,27 @@ export interface MCPConfig {
 
     // Usage Telemetry (tracks extension/MCP usage, NOT BC telemetry data)
     telemetry?: TelemetryConfig;
+
+    /**
+     * Business Central environment settings for user name lookup.
+     *
+     * When App Insights telemetry is captured from a BC environment that lives in a
+     * DIFFERENT Azure AD tenant (e.g. an ISV partner collecting telemetry from a
+     * customer's BC SaaS environment), the `usertelemetryId` in the telemetry data
+     * can be resolved back to a real user name by querying BC's own Admin API.
+     *
+     * Required only for `lookup_user_telemetry_ids` — all other tools work without these.
+     */
+    // AAD tenant ID of the BC environment (may differ from `tenantId` which is the App Insights tenant)
+    bcTenantId?: string;
+    // BC environment name, e.g. "Production" or "Sandbox"
+    bcEnvironmentName?: string;
+    // Override the BC API base URL (default: https://api.businesscentral.dynamics.com)
+    bcBaseUrl?: string;
+
+    // Optional: separate client credentials for the BC tenant (falls back to clientId/clientSecret)
+    bcClientId?: string;
+    bcClientSecret?: string;
 }
 
 /**
@@ -143,7 +164,14 @@ export function loadConfig(): MCPConfig {
 
         queriesFolder: process.env.BCTB_QUERIES_FOLDER || 'queries',
 
-        references: parseReferences(process.env.BCTB_REFERENCES || '[]')
+        references: parseReferences(process.env.BCTB_REFERENCES || '[]'),
+
+        // BC environment settings for user name lookup (optional)
+        bcTenantId: process.env.BCTB_BC_TENANT_ID,
+        bcEnvironmentName: process.env.BCTB_BC_ENVIRONMENT_NAME,
+        bcBaseUrl: process.env.BCTB_BC_BASE_URL,
+        bcClientId: process.env.BCTB_BC_CLIENT_ID,
+        bcClientSecret: process.env.BCTB_BC_CLIENT_SECRET
     };
 }
 

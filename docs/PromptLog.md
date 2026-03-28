@@ -3090,3 +3090,7 @@ Change instructions an business logic to do this."
 > "Start implementation (Phase 1: funding fields in package.json + instruction file for Phases 2 & 3)"
 
 ---
+### Entry ID: ed1565cc-9cea-426f-9bd6-01ebfca7294b — 2026-03-28 10:14
+> "New requirement: enable lookup of user names from BC telemetry — cross-tenant scenario, BC Admin API as authoritative source, Graph API fallback, usertelemetryId is BC-specific field visible on BC User Card but not directly from Graph/Entra; requires BCTB_BC_TENANT_ID + BCTB_BC_ENVIRONMENT_NAME config."
+
+---

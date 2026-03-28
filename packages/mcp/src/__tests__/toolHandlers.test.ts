@@ -41,6 +41,17 @@ jest.mock('@bctb/shared', () => ({
     ReferencesService: jest.fn().mockImplementation(() => ({
         getAllExternalQueries: jest.fn().mockResolvedValue([{ name: 'ext-query' }])
     })),
+    UserLookupService: jest.fn().mockImplementation(() => ({
+        lookupUsers: jest.fn().mockResolvedValue({
+            strategy: 'bc_api',
+            strategyNote: 'Resolved via BC Admin API.',
+            totalQueried: 0,
+            resolvedCount: 0,
+            notFoundCount: 0,
+            users: []
+        }),
+        clearCache: jest.fn()
+    })),
     sanitizeObject: jest.fn((obj: any) => obj),
     lookupEventCategory: jest.fn().mockResolvedValue({
         category: 'Performance',
@@ -134,6 +145,17 @@ function createMockServices(overrides?: Partial<ServerServices>): ServerServices
         } as any,
         references: {
             getAllExternalQueries: jest.fn().mockResolvedValue([{ name: 'ext-query' }])
+        } as any,
+        userLookup: {
+            lookupUsers: jest.fn().mockResolvedValue({
+                strategy: 'bc_api',
+                strategyNote: 'Test lookup',
+                totalQueried: 0,
+                resolvedCount: 0,
+                notFoundCount: 0,
+                users: []
+            }),
+            clearCache: jest.fn()
         } as any,
         usageTelemetry: {
             trackEvent: jest.fn(),

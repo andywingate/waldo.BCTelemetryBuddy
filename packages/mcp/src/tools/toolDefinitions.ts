@@ -262,6 +262,44 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             idempotentHint: true,
             openWorldHint: false
         }
+    },
+    {
+        name: 'lookup_user_telemetry_ids',
+        description: 'Resolve Business Central telemetry user IDs (usertelemetryId) to real user names, BC usernames, and email addresses. BC telemetry records a GUID in customDimensions.usertelemetryId instead of a name to protect PII by default. This tool maps those GUIDs back to human-readable identities — essential for diagnosing permission errors and identifying which user triggered specific events.\n\nTwo lookup strategies are tried automatically:\n1. BC Admin API (primary, authoritative): Queries the BC environment\'s own User table via /api/microsoft/automation/v2.0/users. Returns userName (e.g. "ADMIN.ADW"), displayName, authenticationEmail, and account state. Requires BCTB_BC_TENANT_ID and BCTB_BC_ENVIRONMENT_NAME to be configured — necessary when App Insights lives in a different Azure AD tenant from BC (common ISV/partner scenario).\n2. Graph API (fallback): Looks up the usertelemetryId as an AAD Object ID via Microsoft Graph. Works when BC and App Insights share the same AAD tenant (BC SaaS same-tenant deployments).\n\nPREREQUISITE: The end-user organisation must have consented to this user mapping (PII exposure). This is agreed outside the MCP server. For cross-tenant deployments, configure BCTB_BC_TENANT_ID (the BC customer\'s AAD tenant) and BCTB_BC_ENVIRONMENT_NAME (e.g. "Production").',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                usertelemetryIds: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional: Explicit list of usertelemetryId GUIDs to resolve (from customDimensions.usertelemetryId). If omitted, the telemetry is queried automatically for the specified event or common permission-error events.'
+                },
+                eventId: {
+                    type: 'string',
+                    description: 'Optional: Event ID to find users for (e.g. "AL0000E24" for permission errors). If omitted with no usertelemetryIds, defaults to common BC permission-error event IDs. Call get_event_catalog() to find the right event ID.'
+                },
+                daysBack: {
+                    type: 'number',
+                    description: 'Number of days back to search when querying telemetry for users (default: 30)',
+                    default: 30
+                },
+                aadTenantId: {
+                    type: 'string',
+                    description: 'Optional: Filter telemetry to a specific customer tenant when auto-querying for users (from get_tenant_mapping)'
+                },
+                maxUsers: {
+                    type: 'number',
+                    description: 'Maximum number of distinct users to look up (default: 20, max: 100)',
+                    default: 20
+                }
+            }
+        },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true
+        }
     }
 ];
 
