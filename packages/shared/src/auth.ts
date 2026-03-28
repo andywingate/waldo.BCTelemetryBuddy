@@ -386,6 +386,115 @@ export class AuthService {
     }
 
     /**
+     * Get an access token for the Business Central Admin API.
+     *
+     * Used by UserLookupService to query BC's `/api/microsoft/automation/v2.0/users`
+     * endpoint, which is the authoritative source for the `usertelemetryId → userName`
+     * mapping. Supports a separate BC tenant (`bcTenantId`) so this works in the common
+     * cross-tenant scenario where App Insights lives in a different AAD tenant from BC.
+     *
+     * Falls back to the App Insights tenant when `bcTenantId` is not set.
+     */
+    async getBCAccessToken(): Promise<string> {
+        const bcTenantId = this.config.bcTenantId || this.config.tenantId;
+        const bcClientId = this.config.bcClientId || this.config.clientId;
+        const bcClientSecret = this.config.bcClientSecret || this.config.clientSecret;
+        const bcScope = 'https://api.businesscentral.dynamics.com/.default';
+
+        if (this.config.authFlow === 'azure_cli') {
+            try {
+                // Validate bcTenantId is a GUID before interpolating into shell command
+                const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                if (bcTenantId && !guidRegex.test(bcTenantId)) {
+                    throw new Error(`Invalid bcTenantId format — expected a GUID, got: "${bcTenantId}"`);
+                }
+                const tenantFlag = bcTenantId ? ` --tenant ${bcTenantId}` : '';
+                const { stdout } = await execAsync(
+                    `az account get-access-token --resource https://api.businesscentral.dynamics.com${tenantFlag}`
+                );
+                const tokenResponse = JSON.parse(stdout);
+                if (!tokenResponse.accessToken) {
+                    throw new Error('No access token returned from Azure CLI for BC API');
+                }
+                return tokenResponse.accessToken;
+            } catch (error: any) {
+                throw new Error(`Failed to get BC API token via Azure CLI: ${error.message}`);
+            }
+        }
+
+        if (this.config.authFlow === 'vscode_auth') {
+            const token = process.env.BCTB_BC_ACCESS_TOKEN;
+            if (!token) {
+                throw new Error(
+                    'BCTB_BC_ACCESS_TOKEN environment variable not set.\n' +
+                    'User name lookup via BC API requires a token for https://api.businesscentral.dynamics.com.\n' +
+                    'The VS Code extension must provide this token, or switch to azure_cli or client_credentials auth flow.'
+                );
+            }
+            return token;
+        }
+
+        // device_code / client_credentials — use MSAL with BC scope
+        if (this.config.authFlow === 'client_credentials') {
+            if (!bcClientId || !bcClientSecret) {
+                throw new Error(
+                    'client_credentials flow requires clientId/clientSecret (or bcClientId/bcClientSecret) ' +
+                    'to obtain a BC API token.'
+                );
+            }
+            const cca = new ConfidentialClientApplication({
+                auth: {
+                    clientId: bcClientId,
+                    authority: `https://login.microsoftonline.com/${bcTenantId}`,
+                    clientSecret: bcClientSecret
+                }
+            });
+            const response = await cca.acquireTokenByClientCredential({ scopes: [bcScope] });
+            if (!response?.accessToken) {
+                throw new Error('Failed to acquire BC API token via client credentials');
+            }
+            return response.accessToken;
+        }
+
+        // device_code
+        const clientId = bcClientId || '04b07795-8ddb-461a-bbee-02f9e1bf7b46';
+        const pca = new PublicClientApplication({
+            auth: {
+                clientId,
+                authority: `https://login.microsoftonline.com/${bcTenantId}`
+            }
+        });
+
+        // Try silent first
+        const accounts = await pca.getTokenCache().getAllAccounts();
+        if (accounts.length > 0) {
+            try {
+                const silentResponse = await pca.acquireTokenSilent({
+                    scopes: [bcScope],
+                    account: accounts[0]
+                });
+                if (silentResponse?.accessToken) return silentResponse.accessToken;
+            } catch {
+                // Fall through to device code
+            }
+        }
+
+        const response = await pca.acquireTokenByDeviceCode({
+            scopes: [bcScope],
+            deviceCodeCallback: (r) => {
+                console.log('\n=== BC API DEVICE CODE AUTH ===');
+                console.log(r.message);
+                console.log('===============================\n');
+            }
+        });
+
+        if (!response?.accessToken) {
+            throw new Error('Failed to acquire BC API token via device code flow');
+        }
+        return response.accessToken;
+    }
+
+    /**
      * Get current access token, refresh if needed
      */
     async getAccessToken(): Promise<string> {

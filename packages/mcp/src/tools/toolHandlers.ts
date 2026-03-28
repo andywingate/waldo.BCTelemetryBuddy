@@ -1008,11 +1008,15 @@ ${extendStatements}
     }
 
     /**
-     * Resolve BC telemetry user IDs to real user information via Microsoft Graph API.
+     * Resolve BC telemetry user IDs to real user names.
      *
-     * When usertelemetryIds are provided they are looked up directly.
-     * Otherwise the telemetry is queried to find distinct users for the given eventId
-     * (or common permission-error event IDs if no eventId is specified).
+     * Queries the BC Admin API (when configured) or Graph API (fallback) to map
+     * `usertelemetryId` GUIDs from telemetry to human-readable names, emails, and
+     * BC usernames. Useful for permission error investigation.
+     *
+     * When explicit `usertelemetryIds` are not provided, the telemetry is queried
+     * automatically to find users who triggered the specified event (or common
+     * permission-error event IDs by default).
      */
     async lookupUserTelemetryIds(
         usertelemetryIds?: string[],
@@ -1034,7 +1038,7 @@ ${extendStatements}
             if (invalid.length > 0) {
                 throw new Error(
                     `Invalid usertelemetryId format (expected GUID): ${invalid.slice(0, 3).join(', ')}${invalid.length > 3 ? ` (+${invalid.length - 3} more)` : ''}. ` +
-                    'usertelemetryId values must be AAD Object ID GUIDs (e.g. "a1b2c3d4-e5f6-7890-abcd-ef1234567890").'
+                    'usertelemetryId values must be GUIDs — look them up in customDimensions.usertelemetryId from your telemetry.'
                 );
             }
             resolvedIds = usertelemetryIds.slice(0, clampedMax);
@@ -1042,44 +1046,58 @@ ${extendStatements}
             // Query telemetry to discover distinct users for the event
             resolvedIds = await this.findDistinctUserIds(eventId, daysBack, aadTenantId, clampedMax);
             if (resolvedIds.length === 0) {
+                const hasBCConfig = !!(this.config.bcTenantId && this.config.bcEnvironmentName);
                 return {
-                    totalFound: 0,
+                    strategy: 'none',
                     users: [],
+                    totalQueried: 0,
+                    resolvedCount: 0,
+                    notFoundCount: 0,
+                    strategyNote: 'No telemetry events found.',
                     message: eventId
                         ? `No telemetry events found for event ID "${eventId}" with a usertelemetryId in the last ${daysBack} days.`
                         : `No permission-related telemetry events with a usertelemetryId found in the last ${daysBack} days.`,
-                    hint: 'Check that usertelemetryId is captured for the event. Call get_event_field_samples() to confirm the field exists, or supply explicit usertelemetryIds.'
+                    hint: [
+                        'Verify that the event captures usertelemetryId by calling get_event_field_samples() for the event.',
+                        'Supply explicit usertelemetryIds directly if you already have them.',
+                        hasBCConfig ? '' : 'Configure BCTB_BC_TENANT_ID + BCTB_BC_ENVIRONMENT_NAME to also enable BC Admin API lookups.'
+                    ].filter(Boolean)
                 };
             }
         }
 
-        // Resolve each ID via Graph API
-        const userInfos = await this.services.userLookup.lookupUsers(resolvedIds);
-
-        const resolved = userInfos.filter(u => u.found);
-        const notFound = userInfos.filter(u => !u.found);
+        // Resolve IDs via BC API (primary) or Graph API (fallback)
+        const lookupResult = await this.services.userLookup.lookupUsers(resolvedIds);
 
         return {
-            totalFound: userInfos.length,
-            resolvedCount: resolved.length,
-            notFoundCount: notFound.length,
-            users: userInfos.map(u => ({
+            strategy: lookupResult.strategy,
+            strategyNote: lookupResult.strategyNote,
+            totalQueried: lookupResult.totalQueried,
+            resolvedCount: lookupResult.resolvedCount,
+            notFoundCount: lookupResult.notFoundCount,
+            users: lookupResult.users.map(u => ({
                 usertelemetryId: u.usertelemetryId,
                 displayName: u.displayName,
+                userName: u.userName,
+                authenticationEmail: u.authenticationEmail,
                 userPrincipalName: u.userPrincipalName,
-                mail: u.mail,
+                state: u.state,
                 found: u.found,
+                resolvedVia: u.resolvedVia,
                 error: u.error,
                 kqlFilter: `| where tostring(customDimensions.usertelemetryId) == "${u.usertelemetryId}"`
             })),
             usage: {
-                summary: `Resolved ${resolved.length} of ${userInfos.length} user telemetry IDs to real user names.`,
+                summary: `Resolved ${lookupResult.resolvedCount} of ${lookupResult.totalQueried} user telemetry IDs.`,
                 hints: [
-                    resolved.length > 0
-                        ? `Use kqlFilter from each entry to scope a query to a specific user.`
+                    lookupResult.resolvedCount > 0
+                        ? 'Use the kqlFilter field from each entry to scope any query to that specific user.'
                         : '',
-                    notFound.length > 0
-                        ? `${notFound.length} ID(s) could not be resolved — the user may be from a different tenant, or the authenticated identity may lack Graph API read permissions (requires User.Read.All or Directory.Read.All for service principals).`
+                    lookupResult.notFoundCount > 0
+                        ? `${lookupResult.notFoundCount} ID(s) could not be resolved — see the error field on those entries for details.`
+                        : '',
+                    lookupResult.strategy === 'none'
+                        ? 'Configure BCTB_BC_TENANT_ID and BCTB_BC_ENVIRONMENT_NAME to enable the BC Admin API (authoritative source). Alternatively, ensure the authenticated identity has User.Read.All permission on Graph API for the BC tenant.'
                         : ''
                 ].filter(h => h !== '')
             }
@@ -1095,13 +1113,21 @@ ${extendStatements}
         aadTenantId: string | undefined,
         maxUsers: number
     ): Promise<string[]> {
-        // Default to common BC permission-error event IDs when no eventId specified
-        const eventFilter = eventId
-            ? `| where tostring(customDimensions.eventId) == "${eventId}"`
+        // Sanitize eventId and aadTenantId before embedding in KQL to prevent injection.
+        // BC event IDs are alphanumeric (e.g. "AL0000E24"); AAD tenant IDs are GUIDs.
+        const sanitizeEventId = (id: string): string => id.replace(/[^a-zA-Z0-9_-]/g, '');
+        const sanitizeGuid = (id: string): string => id.replace(/[^a-zA-Z0-9-]/g, '');
+
+        // Default to common BC permission-error event IDs when no eventId specified.
+        // AL0000E24 = permission error; AL0000JRG = job queue error with user context.
+        const safeEventId = eventId ? sanitizeEventId(eventId) : undefined;
+        const eventFilter = safeEventId
+            ? `| where tostring(customDimensions.eventId) == "${safeEventId}"`
             : `| where tostring(customDimensions.eventId) in ("AL0000E24", "AL0000JRG") or (message has "permission" and severityLevel >= 2)`;
 
-        const tenantFilter = aadTenantId
-            ? `| where tostring(customDimensions.aadTenantId) == "${aadTenantId}"`
+        const safeTenantId = aadTenantId ? sanitizeGuid(aadTenantId) : undefined;
+        const tenantFilter = safeTenantId
+            ? `| where tostring(customDimensions.aadTenantId) == "${safeTenantId}"`
             : '';
 
         const kql = [
@@ -1120,7 +1146,7 @@ ${extendStatements}
             return [];
         }
 
-        // Column order from the KQL: usertelemetryId (index 0)
+        // Column order: usertelemetryId (0), eventCount (1), lastSeen (2)
         return result.rows.map((row: any[]) => row[0] as string).filter(Boolean);
     }
 

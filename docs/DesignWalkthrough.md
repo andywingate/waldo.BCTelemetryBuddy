@@ -1840,3 +1840,6 @@ Keep entries short and focused. This doc is your presentation backbone.
 - **2026-03-06** — Added sponsorship Phase 1 (funding fields) and Phases 2+3 instruction file [Entry: 30e242d7-7ded-49d3-bd3b-c9002678c784]
   - **Why:** Surface GitHub Sponsors link in VS Code Marketplace, npm, and GitHub repo header; provide a roadmap for further sponsor touchpoints.
   - **How:** Added unding field to packages/extension/package.json and packages/mcp/package.json; created Instructions/5. Sponsorship/Phases2and3.md with step-by-step guide for Phases 2 (passive UI) and 3 (one-time milestone notification).
+- **2026-03-28** — feat: lookup_user_telemetry_ids tool with BC API + Graph API dual strategy [Entry: ed1565cc-9cea-426f-9bd6-01ebfca7294b]
+  - **Why:** Map BC usertelemetryId GUIDs to real user names for permission error investigation, cross-tenant ISV/partner scenario.
+  - **How:** UserLookupService with BC Admin API (primary) and Graph API (fallback), new config fields bcTenantId/bcEnvironmentName, getBCAccessToken/getGraphAccessToken in AuthService, KQL injection and shell injection sanitization, 32 new tests.

@@ -8,7 +8,7 @@ export interface MCPConfig {
     tenantId: string;
     clientId?: string;
     clientSecret?: string;
-    authFlow: 'device_code' | 'client_credentials' | 'azure_cli';
+    authFlow: 'device_code' | 'client_credentials' | 'azure_cli' | 'vscode_auth';
 
     // Application Insights / Kusto
     applicationInsightsAppId: string;
@@ -35,6 +35,24 @@ export interface MCPConfig {
 
     // Config file path (set by loadConfigFromFile for profile switching)
     configFilePath?: string;
+
+    /**
+     * Business Central environment settings for user name lookup.
+     *
+     * Used by the `lookup_user_telemetry_ids` tool to map `usertelemetryId` GUIDs
+     * in BC telemetry back to real user names via BC's Admin API. Required when the
+     * App Insights instance lives in a different AAD tenant from the BC environment
+     * (common ISV/partner scenario).
+     */
+    // AAD tenant where the BC environment runs (may differ from App Insights tenant)
+    bcTenantId?: string;
+    // BC environment name, e.g. "Production" or "Sandbox"
+    bcEnvironmentName?: string;
+    // Override BC API base URL (default: https://api.businesscentral.dynamics.com)
+    bcBaseUrl?: string;
+    // Optional: separate client credentials for BC tenant (falls back to clientId/clientSecret)
+    bcClientId?: string;
+    bcClientSecret?: string;
 }
 
 export interface Reference {
@@ -97,7 +115,14 @@ export function loadConfig(): MCPConfig {
 
         queriesFolder: process.env.BCTB_QUERIES_FOLDER || 'queries',
 
-        references: parseReferences(process.env.BCTB_REFERENCES || '[]')
+        references: parseReferences(process.env.BCTB_REFERENCES || '[]'),
+
+        // BC environment settings for user name lookup (optional)
+        bcTenantId: process.env.BCTB_BC_TENANT_ID,
+        bcEnvironmentName: process.env.BCTB_BC_ENVIRONMENT_NAME,
+        bcBaseUrl: process.env.BCTB_BC_BASE_URL,
+        bcClientId: process.env.BCTB_BC_CLIENT_ID,
+        bcClientSecret: process.env.BCTB_BC_CLIENT_SECRET
     };
 }
 
