@@ -14,6 +14,7 @@ import {
     CacheService,
     QueriesService,
     ReferencesService,
+    UserLookupService,
     sanitizeObject,
     lookupEventCategory,
     IUsageTelemetry,
@@ -52,6 +53,7 @@ export interface ServerServices {
     cache: CacheService;
     queries: QueriesService;
     references: ReferencesService;
+    userLookup: UserLookupService;
     usageTelemetry: IUsageTelemetry;
     installationId: string;
     sessionId: string;
@@ -122,12 +124,14 @@ export function initializeServices(
         }
     }
 
+    const authService = new AuthService(config);
     return {
-        auth: new AuthService(config),
+        auth: authService,
         kusto: new KustoService(config.applicationInsightsAppId, config.kustoClusterUrl, usageTelemetry),
         cache: new CacheService(config.workspacePath, config.cacheTTLSeconds, config.cacheEnabled),
         queries: new QueriesService(config.workspacePath, config.queriesFolder),
         references: new ReferencesService(config.references, usageTelemetry as any), // ReferencesService accepts cache or telemetry
+        userLookup: new UserLookupService(config, authService),
         usageTelemetry,
         installationId,
         sessionId
@@ -299,6 +303,16 @@ export class ToolHandlers {
                     } else {
                         result = this.services.auth.getStatus();
                     }
+                    break;
+
+                case 'lookup_user_telemetry_ids':
+                    result = await this.lookupUserTelemetryIds(
+                        params?.usertelemetryIds,
+                        params?.eventId,
+                        params?.daysBack || 30,
+                        params?.aadTenantId,
+                        params?.maxUsers || 20
+                    );
                     break;
 
                 default:
@@ -991,6 +1005,123 @@ ${extendStatements}
                 recommendation: 'Use aadTenantId for filtering telemetry queries. Example: | where tostring(customDimensions.aadTenantId) == "{tenantId}"'
             }
         };
+    }
+
+    /**
+     * Resolve BC telemetry user IDs to real user information via Microsoft Graph API.
+     *
+     * When usertelemetryIds are provided they are looked up directly.
+     * Otherwise the telemetry is queried to find distinct users for the given eventId
+     * (or common permission-error event IDs if no eventId is specified).
+     */
+    async lookupUserTelemetryIds(
+        usertelemetryIds?: string[],
+        eventId?: string,
+        daysBack: number = 30,
+        aadTenantId?: string,
+        maxUsers: number = 20
+    ): Promise<any> {
+        this.checkConfigurationComplete();
+
+        const clampedMax = Math.min(Math.max(1, maxUsers), 100);
+
+        let resolvedIds: string[];
+
+        if (usertelemetryIds && usertelemetryIds.length > 0) {
+            // Caller supplied explicit IDs — validate GUID format and use them directly
+            const guidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const invalid = usertelemetryIds.filter(id => !guidRegex.test(id));
+            if (invalid.length > 0) {
+                throw new Error(
+                    `Invalid usertelemetryId format (expected GUID): ${invalid.slice(0, 3).join(', ')}${invalid.length > 3 ? ` (+${invalid.length - 3} more)` : ''}. ` +
+                    'usertelemetryId values must be AAD Object ID GUIDs (e.g. "a1b2c3d4-e5f6-7890-abcd-ef1234567890").'
+                );
+            }
+            resolvedIds = usertelemetryIds.slice(0, clampedMax);
+        } else {
+            // Query telemetry to discover distinct users for the event
+            resolvedIds = await this.findDistinctUserIds(eventId, daysBack, aadTenantId, clampedMax);
+            if (resolvedIds.length === 0) {
+                return {
+                    totalFound: 0,
+                    users: [],
+                    message: eventId
+                        ? `No telemetry events found for event ID "${eventId}" with a usertelemetryId in the last ${daysBack} days.`
+                        : `No permission-related telemetry events with a usertelemetryId found in the last ${daysBack} days.`,
+                    hint: 'Check that usertelemetryId is captured for the event. Call get_event_field_samples() to confirm the field exists, or supply explicit usertelemetryIds.'
+                };
+            }
+        }
+
+        // Resolve each ID via Graph API
+        const userInfos = await this.services.userLookup.lookupUsers(resolvedIds);
+
+        const resolved = userInfos.filter(u => u.found);
+        const notFound = userInfos.filter(u => !u.found);
+
+        return {
+            totalFound: userInfos.length,
+            resolvedCount: resolved.length,
+            notFoundCount: notFound.length,
+            users: userInfos.map(u => ({
+                usertelemetryId: u.usertelemetryId,
+                displayName: u.displayName,
+                userPrincipalName: u.userPrincipalName,
+                mail: u.mail,
+                found: u.found,
+                error: u.error,
+                kqlFilter: `| where tostring(customDimensions.usertelemetryId) == "${u.usertelemetryId}"`
+            })),
+            usage: {
+                summary: `Resolved ${resolved.length} of ${userInfos.length} user telemetry IDs to real user names.`,
+                hints: [
+                    resolved.length > 0
+                        ? `Use kqlFilter from each entry to scope a query to a specific user.`
+                        : '',
+                    notFound.length > 0
+                        ? `${notFound.length} ID(s) could not be resolved — the user may be from a different tenant, or the authenticated identity may lack Graph API read permissions (requires User.Read.All or Directory.Read.All for service principals).`
+                        : ''
+                ].filter(h => h !== '')
+            }
+        };
+    }
+
+    /**
+     * Query telemetry to find distinct usertelemetryId values for the given event
+     */
+    private async findDistinctUserIds(
+        eventId: string | undefined,
+        daysBack: number,
+        aadTenantId: string | undefined,
+        maxUsers: number
+    ): Promise<string[]> {
+        // Default to common BC permission-error event IDs when no eventId specified
+        const eventFilter = eventId
+            ? `| where tostring(customDimensions.eventId) == "${eventId}"`
+            : `| where tostring(customDimensions.eventId) in ("AL0000E24", "AL0000JRG") or (message has "permission" and severityLevel >= 2)`;
+
+        const tenantFilter = aadTenantId
+            ? `| where tostring(customDimensions.aadTenantId) == "${aadTenantId}"`
+            : '';
+
+        const kql = [
+            `traces`,
+            `| where timestamp >= ago(${daysBack}d)`,
+            `| where isnotempty(customDimensions.usertelemetryId)`,
+            eventFilter,
+            tenantFilter,
+            `| summarize eventCount = count(), lastSeen = max(timestamp) by usertelemetryId = tostring(customDimensions.usertelemetryId)`,
+            `| top ${maxUsers} by eventCount desc`
+        ].filter(line => line !== '').join('\n');
+
+        const result = await this.executeQuery(kql, false, false);
+
+        if (result.type === 'error' || !result.rows || result.rows.length === 0) {
+            return [];
+        }
+
+        // Column order from the KQL: usertelemetryId (index 0)
+        return result.rows.map((row: any[]) => row[0] as string).filter(Boolean);
     }
 
     /**

@@ -269,6 +269,123 @@ export class AuthService {
     }
 
     /**
+     * Get an access token for Microsoft Graph API.
+     * Used by UserLookupService to resolve usertelemetryId to real user names.
+     * Requires same-tenant access — works when App Insights and BC are in the same AAD tenant.
+     */
+    async getGraphAccessToken(): Promise<string> {
+        if (this.config.authFlow === 'azure_cli') {
+            return this.getAzureCLIGraphToken();
+        } else if (this.config.authFlow === 'device_code') {
+            return this.getDeviceCodeGraphToken();
+        } else if (this.config.authFlow === 'vscode_auth') {
+            return this.getVSCodeGraphToken();
+        } else {
+            return this.getClientCredentialsGraphToken();
+        }
+    }
+
+    /**
+     * Azure CLI: get Graph API token via az account get-access-token
+     */
+    private async getAzureCLIGraphToken(): Promise<string> {
+        try {
+            const { stdout } = await execAsync(
+                'az account get-access-token --resource https://graph.microsoft.com'
+            );
+            const tokenResponse = JSON.parse(stdout);
+            if (!tokenResponse.accessToken) {
+                throw new Error('No access token returned from Azure CLI for Graph API');
+            }
+            return tokenResponse.accessToken;
+        } catch (error: any) {
+            throw new Error(`Failed to get Graph API token via Azure CLI: ${error.message}`);
+        }
+    }
+
+    /**
+     * Device code flow: acquire Graph API token (interactive if not cached)
+     */
+    private async getDeviceCodeGraphToken(): Promise<string> {
+        const clientId = this.config.clientId || '04b07795-8ddb-461a-bbee-02f9e1bf7b46';
+        const pca = new PublicClientApplication({
+            auth: {
+                clientId,
+                authority: `https://login.microsoftonline.com/${this.config.tenantId}`
+            }
+        });
+
+        // Try silent token acquisition from cache first
+        const accounts = await pca.getTokenCache().getAllAccounts();
+        if (accounts.length > 0) {
+            try {
+                const silentResponse = await pca.acquireTokenSilent({
+                    scopes: ['https://graph.microsoft.com/.default'],
+                    account: accounts[0]
+                });
+                if (silentResponse?.accessToken) {
+                    return silentResponse.accessToken;
+                }
+            } catch {
+                // Fall through to device code
+            }
+        }
+
+        const response = await pca.acquireTokenByDeviceCode({
+            scopes: ['https://graph.microsoft.com/.default'],
+            deviceCodeCallback: (r) => {
+                console.log('\n=== GRAPH API DEVICE CODE AUTH ===');
+                console.log(r.message);
+                console.log('==================================\n');
+            }
+        });
+
+        if (!response?.accessToken) {
+            throw new Error('Failed to acquire Graph API token via device code flow');
+        }
+        return response.accessToken;
+    }
+
+    /**
+     * Client credentials: acquire Graph API token for service principal
+     */
+    private async getClientCredentialsGraphToken(): Promise<string> {
+        if (!this.config.clientId || !this.config.clientSecret) {
+            throw new Error('Client credentials flow requires clientId and clientSecret');
+        }
+        const cca = new ConfidentialClientApplication({
+            auth: {
+                clientId: this.config.clientId,
+                authority: `https://login.microsoftonline.com/${this.config.tenantId}`,
+                clientSecret: this.config.clientSecret
+            }
+        });
+        const response = await cca.acquireTokenByClientCredential({
+            scopes: ['https://graph.microsoft.com/.default']
+        });
+        if (!response?.accessToken) {
+            throw new Error('Failed to acquire Graph API token via client credentials');
+        }
+        return response.accessToken;
+    }
+
+    /**
+     * VS Code auth: get Graph API token from BCTB_GRAPH_ACCESS_TOKEN env var.
+     * The VS Code extension must set this variable when spawning the MCP process.
+     */
+    private async getVSCodeGraphToken(): Promise<string> {
+        const token = process.env.BCTB_GRAPH_ACCESS_TOKEN;
+        if (!token) {
+            throw new Error(
+                'BCTB_GRAPH_ACCESS_TOKEN environment variable not set.\n' +
+                'User name lookup requires Microsoft Graph API access.\n' +
+                'The VS Code extension must provide this token, or switch to azure_cli auth flow.'
+            );
+        }
+        return token;
+    }
+
+    /**
      * Get current access token, refresh if needed
      */
     async getAccessToken(): Promise<string> {

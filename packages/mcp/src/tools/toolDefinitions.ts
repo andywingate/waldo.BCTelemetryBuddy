@@ -262,6 +262,44 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
             idempotentHint: true,
             openWorldHint: false
         }
+    },
+    {
+        name: 'lookup_user_telemetry_ids',
+        description: 'Resolve Business Central telemetry user IDs (usertelemetryId) to real user names via Microsoft Graph API. BC telemetry records a GUID (usertelemetryId = AAD Object ID) instead of a human-readable name. This tool maps those GUIDs to display names, email addresses, and login names so you can identify exactly which users triggered specific events — particularly useful for diagnosing permission errors. PREREQUISITE: The App Insights instance and the BC environment must be in the same Azure AD tenant, and the authenticated identity must have permission to read users from Graph API (User.Read.All for service principals; User.Read for delegated). USAGE: Either supply explicit usertelemetryIds to look up, or provide an eventId to automatically query the telemetry for users who triggered that event. If neither is provided, queries for recent permission-related error events. Returns a list of resolved users with displayName and userPrincipalName, plus a ready-to-use KQL filter snippet for each user.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                usertelemetryIds: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: 'Optional: Explicit list of usertelemetryId GUIDs to resolve. If omitted, telemetry is queried automatically.'
+                },
+                eventId: {
+                    type: 'string',
+                    description: 'Optional: Event ID to find users for (e.g. "AL0000E24" for permission errors). If omitted with no usertelemetryIds, defaults to common permission-error event IDs.'
+                },
+                daysBack: {
+                    type: 'number',
+                    description: 'Number of days back to search when querying telemetry for users (default: 30)',
+                    default: 30
+                },
+                aadTenantId: {
+                    type: 'string',
+                    description: 'Optional: Filter telemetry to a specific tenant when querying for users (from get_tenant_mapping)'
+                },
+                maxUsers: {
+                    type: 'number',
+                    description: 'Maximum number of distinct users to look up (default: 20, max: 100)',
+                    default: 20
+                }
+            }
+        },
+        annotations: {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: false,
+            openWorldHint: true
+        }
     }
 ];
 
